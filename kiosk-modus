@@ -1,0 +1,560 @@
+#!/bin/bash
+# ---------------------------------------------------------------------------
+# kiosk-modus - kiosk benutzer erstellen oder verwalten
+
+# Copyright 2021, Pascal Hofmann <pascal@hofmann>
+  
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License at <http://www.gnu.org/licenses/> for
+# more details.
+
+# Usage: kiosk-modus [-h|--help] [-u|--URL URL] [-t|--tk TK] [-l|--leiste LEISTE] [-v|--verbose VERBOSE] [-r|--restart RESTART]
+
+# Revision history:
+# 2021-05-17 Created by neuesscript.sh ver. 3.61
+# ---------------------------------------------------------------------------
+
+#PROGNAME=${0##*/}
+#PROGDIR=${0%/*}
+PROGNAME=$(basename "${0}")
+DIRNAME=$(dirname "${0}")
+VERSION="1.0"
+TRUE=0
+FALSE=1
+tbname=""
+istrue(){ return ; }
+
+# Durchführen von Bereinigungen, wenn das Programm beendet wird.
+# z.B. löschen von temporären Dateien usw.
+clean_up() {
+  return
+}
+
+# Fehler auf Fehlerausgabe ausgeben und beenden.
+# Der Funktion wird ein Text als Fehlermeldung übergeben.
+# Falls kein Text angegeben wurde, kommt ein Standardtext.
+error_exit() {
+  echo -e "${PROGNAME}: ${1:-"Unbekannter Fehler."}" >&2
+  clean_up
+  exit 1
+}
+
+# Maßnahmen, wenn das Programm normal beendet wird.
+# Der Funktion kann ein Text für die Standardausgabe übergeben werden.
+standard_exit() {
+  if [ -n "$1" ]; then
+    echo "$1"
+  fi
+  clean_up
+  exit 0
+}
+
+signal_exit() { # Handle trapped signals
+  case $1 in
+    INT)
+      error_exit "Programm vom Benutzer abgebrochen" ;;
+    TERM)
+      echo -e "\n$PROGNAME: Programm abgebrochen" >&2
+      standard_exit ;;
+    *)
+      error_exit "$PROGNAME: Beendet durch unbekanntes Signal" ;;
+  esac
+}
+# tbvartest überprüft, ob die gewünschte veränderung, übereinstimmt.
+# übergeben werden, müssen die Key´s und welcher Datentyp die Variable hat
+tbvartest() {
+local tbkeyvar="$1"
+local tbdtyp="$2"
+local tbrem
+if [[ $tbdtyp = \" ]]; then
+    tbdtyp=""
+fi
+echo $tbkeyvar
+# Speichert die Variable, mit den jetzigen Wert aus prefoverride
+tbrem=$(sed -n "/^$tbkeyvar=/p" /home/$tbname/.icewm/prefoverride | sed -r 's/([^\#]*)\#.*/\1/')
+# überprüft, ob der Wert der Variable ein bool oder ein string ist und ob der Wert den man eingeben will auch ein bool oder ein text ist
+if [[ "$tbrem" =~ \" ]]; then
+    if [[ ! "$tbdtyp" = [0-1] ]]; then
+        tbvarschreiben "$tbkeyvar" "$tbdtyp"
+    else
+        echo "der bool von $tbkeyvar kann nicht eingeben werden"
+    fi
+elif [[ ! "$tbrem" =~ \" ]]; then
+    if [[ "$tbdtyp" = [0-1] ]]; then
+        tbvarschreiben "$tbkeyvar" "$tbdtyp"
+    else
+        echo "der string von $tbkeyvar kann nicht angegeben werden"
+    fi
+fi
+
+}
+# schreibt in die prefoverride Datei alle nötigen einstellungen
+tbvarschreiben() {
+local tbkeysch="$1"
+local tbdsch="$2"
+if [[ "$tbdsch" =~ [a-zA-Z] ]]; then
+    sed -i "s/^$tbkeysch=\".*\"/$tbkeysch=\"$tbdsch\"/g" "/home/$tbname/.icewm/prefoverride"
+elif [[ "$tbdsch" =~ [0-1] ]]; then
+    sed -i "s/^$tbkeysch=./$tbkeysch=$tbdsch/g" "/home/$tbname/.icewm/prefoverride"
+fi
+}
+# "menu" ist das Menü was am anfang ausgeführt wird. Wo man entweder, den Kiosk-Modus verwaltet oder ihn einrichtet
+menu() {
+local abbruch=$TRUE
+while [ $abbruch = $TRUE ];do
+MENU=`dialog --menu "Kiosk-Modus verwalten oder einrichten" 0 0 0 "einrichten" "" "einstellen" "" 3>&1 1>&2 2>&3`
+retval=$?
+clear
+case $retval in
+  0)
+    if [ $MENU = "einstellen" ]; then
+    einstellen
+    elif [ $MENU = "einrichten" ]; then
+    einrichten
+    fi;;
+  1)
+    standard_exit
+    abbruch=$FALSE;;
+  255)
+    standard_exit
+    abbruch=$FALSE;;
+esac
+done
+
+}
+
+einstellen() {
+local abbruch=$TRUE
+local NA
+local NEWtbname
+local pass
+local tbtasten
+local tbleiste
+while [ $abbruch = $TRUE ]; do
+EINST=`dialog --menu "Kiosk-Modus einstellen" 0 0 0 "Passwort" "" "automatische Anmeldung" "" "Name" "" "URL" "" "Zeitpunkt des shutdowns" "" "Wochentag der Updates" "" "Tastenkürzel" "" "untere Leiste" "" "zurück auf Standard" "" 3>&1 1>&2 2>&3`
+retval=$?
+clear
+case $retval in
+  0)
+    if [ $EINST = "Passwort" ]; then
+        tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+        NA=$?
+        case $NA in
+        0)
+            getent passwd $tbname > /dev/null 2&>1
+            if [ $? = $TRUE ];then
+                pass=`dialog --radiolist "wollen sie das Passwort für $tbname leer lassen dass sich niemand mit dem Benutzer anmelden kann?" 0 0 2 ja "" on nein "" off 3>&1 1>&2 2>&3`
+                if [ $? = $TRUE ]; then
+                    if [ $pass = "ja" ];then
+                        passwd -d $tbname
+                    else
+                        clear
+                        passwd $tbname
+                        if [ $? = "10" ]; then
+                            dialog --msgbox "Sie haben das Passwort beim zweiten Mal nicht korrekt angegeben, also wurde es nicht übernommen" 0 0
+                            wait $!
+                        fi
+                    fi
+                fi
+            else
+                dialog --msgbox "Der ausgewählte Name $tbname existiert nicht" 0 0
+                wait $!
+            fi;;
+        1)
+            ;;
+        255)
+            ;;
+        esac
+    elif [[ $EINST = "automatische Anmeldung" ]]; then
+        while [ -z $tbname ]; do
+            tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            # Überprüft ob der Benutzer existiert
+            getent passwd $tbname > /dev/null 2&>1 
+            # wenn der Benutzer nicht existiert, soll man einen vorhandenen Benutzer angeben
+            if [ ! $? = $TRUE ]; then
+                # abbruch bedingung der Schleife wird nicht erfüllt 
+                tbname=""
+            fi
+        done
+        # wenn der Benutzer da ist, wird abgefragt, ob eine automatische Anmeldung erfolgen soll oder nicht.
+        if [ -n "$tbname" ]; then 
+            pass=`dialog --radiolist "wollen sie die automatische Anmeldung für $tbname an oder aus machen" 0 0 2 on "" on off "" off 3>&1 1>&2 2>&3`
+            # wenn die automatische Anmeldung erfolgen soll, wird die Variable "DISPLAYMANAGER_AUTOLOGIN=" mit dem Benutzer eingesetzt 
+            if [ $pass = "on" ]; then
+                sed -i "s/\DISPLAYMANAGER_AUTOLOGIN=.*/\DISPLAYMANAGER_AUTOLOGIN=\"$tbname\"/g" "/etc/sysconfig/displaymanager"
+            # wenn die automatische Anmeldung nicht erfolgen soll, wird die Variable "DISPLAYMANAGER_AUTOLOGIN=" leer gemacht
+            elif [ $pass = "off" ]; then
+                sed -i "s/\DISPLAYMANAGER_AUTOLOGIN=.*/\DISPLAYMANAGER_AUTOLOGIN=\"\"/g" "/etc/sysconfig/displaymanager"
+            fi
+        fi
+    elif [[ $EINST = "zurück auf Standard" ]]; then
+        while [ -z $tbname ]; do
+            tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            # Überprüft ob der Benutzer existiert
+            getent passwd $tbname > /dev/null 2&>1 
+            # wenn der Benutzer nicht existiert, soll man einen vorhandenen Benutzer angeben
+            if [ ! $? = $TRUE ]; then
+                # abbruch bedingung der Schleife wird nicht erfüllt 
+                tbname=""
+            fi
+        done
+        # wenn der Benutzer da ist, wird abgefragt, ob eine automatische Anmeldung erfolgen soll oder nicht.
+        if [ -n "$tbname" ]; then
+        while read line 
+        do 
+            var1=$(echo -n "$line" | sed -r 's/([^\=]*)\=.*/\1/')
+            var2=$(echo -n "$line" | sed -r 's/.*\=([^\=]*)/\1/')
+            tbvartest "$var1" "$var2"
+        done < $DIRNAME/kiosk.conf
+        fi
+    elif [ $EINST = "Name" ]; then
+    tbname=`dialog --inputbox "Alten Kiosk-Benutzer Namen eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+    NA=$?
+    case $NA in
+    0)
+        getent passwd $tbname > /dev/null 2&>1 
+        if [ $? = $TRUE ];then
+            NEWtbname=`dialog --inputbox "Neuen Kiosk-Benutzer Namen eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            NA=$?
+            case $NA in
+            0)
+                usermod -l $NEWtbname $tbname
+                tbname=$NEWtbname
+                ;;
+            1)
+                ;;
+            255)
+                ;;
+            esac
+        else 
+            dialog --msgbox "Der ausgewählte Name existiert nicht" 0 0
+            wait $!
+        fi;;
+    1)
+        ;;
+    255)
+        ;;
+    esac
+    elif [ $EINST = "URL" ]; then
+    while [ -z "$tbname" ]; do
+            tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            # Überprüft ob der Benutzer existiert
+            getent passwd $tbname > /dev/null 2&>1 
+            # wenn der Benutzer nicht existiert, soll man einen vorhandenen Benutzer angeben
+            if [ ! $? = $TRUE ]; then
+                # abbruch bedingung der Schleife wird nicht erfüllt 
+                tbname=""
+            fi
+        done
+        if [ -n "$tbname" ]; then
+            while [ $tburl = "503" ] || [ -z $tburl ]; do
+                URL=`dialog --inputbox "eine Funktionierende URL angeben" 0 0 "" 3>&1 1>&2 2>&3`
+                safe=$?
+                if [ ! $safe = $TRUE ]; then
+                    break
+                fi
+                tburl=$(curl -Is $URL | head -1 | cut -d" " -f2)
+            done
+            printf '#!/bin/sh' > /home/$tbname/.icewm/startup
+            printf "\nfiregox -kiosk $URL \nsleep 10\n" >> /home/$tbname/.icewm/startup
+        fi
+    elif [[ $EINST = "Zeitpunkt des shutdowns" ]]; then
+        while [ -z "$tbname" ]; do
+            tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            # Überprüft ob der Benutzer existiert
+            getent passwd $tbname > /dev/null 2&>1 
+            # wenn der Benutzer nicht existiert, soll man einen vorhandenen Benutzer angeben
+            if [ ! $? = $TRUE ]; then
+                # abbruch bedingung der Schleife wird nicht erfüllt 
+                tbname=""
+            fi
+        done
+        if [ -n "$tbname" ]; then
+            # um wie viel Uhr der Rechner jeden Tag herunterfahren soll
+            tbtime=`dialog --timebox "um wie viel Uhr soll der Rechner jeden Tag herunterfahren" 0 0 16 0 0 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            tbtimeh=$(echo $tbtime | cut -d':' -f1)
+            tbtimem=$(echo $tbtime | cut -d':' -f2)
+            echo "$tbtimem $tbtimeh * * * /root/bin/beenden.sh" > /root/crons/cronjob.tmp
+        fi
+    elif [[ $EINST = "Wochentag der Updates" ]]; then
+        while [ -z "$tbname" ]; do
+            tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            # Überprüft ob der Benutzer existiert
+            getent passwd $tbname > /dev/null 2&>1 
+            # wenn der Benutzer nicht existiert, soll man einen vorhandenen Benutzer angeben
+            if [ ! $? = $TRUE ]; then
+                # abbruch bedingung der Schleife wird nicht erfüllt 
+                tbname=""
+            fi
+        done
+        if [ -n "$tbname" ]; then
+            # wähle ein Wochentag aus, an dem das Update gemacht werden soll
+            tbdate=`dialog --stdout --date-format "%wd" --title "Calendar" --calendar "wähle ein Wochentag aus, an dem das Update gemacht werden soll" 0 0 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            printf '#!/bin/bash' > /root/bin/beenden.sh
+            printf "\n" >> /root/bin/beenden.sh
+            echo "if [[ \"\$(date +%u)\" =~ \"$tbdate\" ]]; then" >> /root/bin/beenden.sh
+            printf "zypper --non-interactive refresh &>/dev/null \nzypper --non-interactive Update --auto-agree-with-licenses &>/dev/null \nfi \nshutdown -h now &>/dev/null " >> /root/bin/beenden.sh
+        fi
+    elif [ $EINST = "Tastenkürzel" ]; then
+        while [ -z $tbname ]; do
+            tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            # Überprüft ob der Benutzer existiert
+            getent passwd $tbname > /dev/null 2&>1 
+            # wenn der Benutzer nicht existiert, soll man einen vorhandenen Benutzer angeben
+            if [ ! $? = $TRUE ]; then
+                # abbruch bedingung der Schleife wird nicht erfüllt 
+                tbname=""
+            fi
+        done
+        # wenn der Benutzer da ist, wird abgefragt, ob die prefoverride Datei da ist.
+        if [ -n "$tbname" ]; then
+            if [ -f /home/$tbname/.icewm/prefoverride ]; then
+                tbtasten=`dialog --checklist "Welche Tastenkürzel sollen aktiviert oder deaktiviert werden?" 0 0 2 Alt+F4 "" off Alt+Tab "" off 3>&1 1>&2 2>&3`
+                if [[ "$tbtasten" =~ "Alt+Tab" ]]; then
+                    tbvartest "KeySysSwitchNext" "Alt+Tab"
+                else
+                    tbvartest "KeySysSwitchNext" ""
+                fi
+                if [[ "$tbtasten" =~ "Alt+F4" ]]; then
+                    tbvartest "KeyWinClose" "Alt+F4"
+                else
+                    tbvartest "KeyWinClose" ""
+                fi
+            fi
+        fi
+    # Stellt ein ob die untere Leiste angezeigt werden soll oder nicht
+    elif [[ $EINST = "untere Leiste" ]]; then
+    # überprüft ob ein Benutzer angeben ist, wenn nicht wird nach einem existierenden Benutzer gefragt.
+        while [ -z $tbname ]; do
+            tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            # Überprüft ob der Benutzer existiert
+            getent passwd $tbname > /dev/null 2&>1 
+            # wenn der Benutzer nicht existiert, soll man einen vorhandenen Benutzer angeben
+            if [ ! $? = $TRUE ]; then
+                # abbruch bedingung der Schleife wird nicht erfüllt 
+                tbname=""
+            fi
+        done
+        # wenn der Benutzer da ist, wird abgefragt, ob die prefoverride Datei da ist.
+        if [ -n "$tbname" ]; then
+            if [ -f /home/$tbname/.icewm/prefoverride ]; then
+                tbleiste=`dialog --radiolist "wollen sie die untere Leiste an oder aus machen?" 0 0 2 an "" off aus "" on 3>&1 1>&2 2>&3`
+                if [ ! $? = $TRUE ]; then
+                    break
+                fi
+                if [ $tbleiste = "an" ]; then
+                    tbvartest "ShowTaskBar" "1"
+                elif [ $tbleiste = "aus" ]; then
+                    tbvartest "ShowTaskBar" "0"
+                fi
+            fi
+        fi  
+    fi;;
+  1)
+    abbruch=$FALSE;;
+  255)
+    abbruch=$FALSE;;
+esac
+done
+}
+# Richtet den Benutzer komplett mit Kiosk-modus ein
+einrichten() {
+local abbruch=$TRUE
+local NEWtbname
+local pass="nein"
+local URL
+local tburl
+local tbtime
+local tbdate
+tbname="Kiosk"
+while [ $abbruch = $TRUE ];do
+INIT=`dialog --menu "Kiosk-Modus einrichten für Benutzer $tbname" 0 0 0 "einrichten" "" "Name" "" "Passwort" "" 3>&1 1>&2 2>&3`
+retval=$?
+clear
+case $retval in
+  0)
+    if [ $INIT = "einrichten" ]; then
+        while [ $tburl = "503" ] || [ -z $tburl ]; do
+            URL=`dialog --inputbox "eine Funktionierende URL angeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ $? = $FALSE ]; then
+                break
+            fi
+            tburl=$(curl -Is $URL | head -1 | cut -d" " -f2)
+        done
+        if [ -z $URL ]; then
+            break
+        fi
+        if [ -z $tbname ]; then
+            tbname="Kiosk"
+        fi
+        # wähle ein Wochentag aus, an dem das Update gemacht werden soll
+        tbdate=`dialog --stdout --date-format "%wd" --title "Calendar" --calendar "wähle ein Wochentag aus, an dem das Update gemacht werden soll" 0 0 3>&1 1>&2 2>&3`
+        if [ ! $? = $TRUE ]; then
+            break
+        fi
+        # um wie viel Uhr der Rechner jeden Tag herunterfahren soll
+        tbtime=`dialog --timebox "um wie viel Uhr soll der Rechner jeden Tag herunterfahren" 0 0 16 0 0 3>&1 1>&2 2>&3`
+        if [ ! $? = $TRUE ]; then
+            break
+        fi
+        useradd -m $tbname
+        if [ ! $? = $TRUE ]; then
+            dialog --yesno "der Benutzer existiert bereits, wollen sie wirklich fortfahren" 0 0
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+        fi
+        if [ $pass = "nein" ];then
+            passwd -d $tbname
+        else
+            clear
+            passwd $tbname
+            if [ $? = "10" ]; then
+                userdel $tbname
+                dialog --msgbox "Sie haben das Passwort beim zweiten Mal nicht korrekt angegeben, also wurde es nicht übernommen und der User nicht erstellt" 0 0
+                wait $!
+            fi
+        fi
+        printf '#!/bin/bash' > /root/bin/beenden.sh
+        printf "\n" >> /root/bin/beenden.sh
+        echo "if [[ \"\$(date +%u)\" =~ \"$tbdate\" ]]; then" >> /root/bin/beenden.sh
+        printf "zypper --non-interactive refresh &>/dev/null \nzypper --non-interactive Update --auto-agree-with-licenses &>/dev/null \nfi \nshutdown -h now &>/dev/null " >> /root/bin/beenden.sh
+        tbtimeh=$(echo $tbtime | cut -d':' -f1)
+        tbtimem=$(echo $tbtime | cut -d':' -f2)
+        mkdir /root/crons
+        echo "$tbtimem $tbtimeh * * * /root/bin/beenden.sh" > /root/crons/cronjob.tmp
+        mkdir /home/$tbname/.icewm
+        cp /etc/icewm/prefoverride /home/$tbname/.icewm
+        cat ${DIRNAME}/kiosk.conf >> /home/$tbname/.icewm/prefoverride
+        printf '#!/bin/sh' > /home/$tbname/.icewm/startup
+        printf "\nfiregox -kiosk $URL \nsleep 10\n" >> /home/$tbname/.icewm/startup
+        chown $tbname /home/$tbname/.icewm/*
+        chgrp $tbname /home/$tbname/.icewm/*
+        chmod 500 /home/$tbname/.icewm/*
+    elif [ $INIT = "Name" ]; then 
+        tbname=""
+        while [ -z $tbname ]; do
+            tbname=`dialog --inputbox "Kiosk-Benutzer Name eingeben" 0 0 "" 3>&1 1>&2 2>&3`
+            if [ ! $? = $TRUE ]; then
+                break
+            fi
+            if [ $tbname = "root" ]; then
+                tbname=""
+            fi
+        done
+    elif [ $INIT = "Passwort" ]; then
+        pass=`dialog --radiolist "wollen sie ein Passwort angeben?" 0 0 2 ja "" off nein "" on 3>&1 1>&2 2>&3`
+    fi;;
+  1)
+    abbruch=$FALSE;;
+  255)
+    abbruch=$FALSE;;
+esac
+done
+}
+
+# Benutzungshinweise zum Programm
+usage() {
+  echo -e "Usage: $PROGNAME [-h|--help] [-u|--URL URL] [-t|--tk TK] [-l|--leiste LEISTE] [-v|--verbose VERBOSE] [-r|--restart RESTART]"
+}
+
+# Weitergehende Informationen zur Benutzung
+help_message() {
+  cat <<- _EOF_
+  $PROGNAME ver. $VERSION
+  kiosk benutzer erstellen oder verwalten
+
+  $(usage)
+
+  Options:
+  -h, --help  Anzeigen dieser Hilfe und beenden.
+  -u, --URL URL  bestimmt die URL
+      Mit 'URL' ist .
+  -t, --tk TK  aktiviert/deaktiviert Tastenkürzel
+      Mit 'TK' ist .
+  -l, --leiste LEISTE  aktiviert/deaktiviert die untere Leiste
+      Mit 'LEISTE' ist .
+  -v, --verbose VERBOSE  um mehr Ausgabe zu bekommen
+      Mit 'VERBOSE' ist .
+  -r, --restart RESTART  startet die grafische Oberfläche neu
+      Mit 'RESTART' ist .
+
+  Hinweis: Sie müssen root sein, um das Programm zu verwenden.
+
+_EOF_
+  return
+}
+
+# Signale abfabgen und darauf reagieren
+trap "signal_exit TERM" TERM HUP
+trap "signal_exit INT"  INT
+
+# Überprüfung, ob der Aufruf nur durch root erfolgen darf.
+# Überprüfe root-Benutzer
+if [[ $(id -u) != 0 ]]; then
+  error_exit "Sie müssen root sein, um das Programm zu verwenden."
+fi
+
+# Kommandozeile auswerten
+while [[ -n $1 ]]; do
+  case $1 in
+    -h | --help)
+      help_message; standard_exit ;;
+    -u | --URL)
+      echo "bestimmt die URL"; shift; URL="$1" ;;
+    -t | --tk)
+      echo "aktiviert/deaktiviert Tastenkürzel"; shift; TK="$1" ;;
+    -l | --leiste)
+      echo "aktiviert/deaktiviert die untere Leiste"; shift; LEISTE="$1" ;;
+    -v | --verbose)
+      echo "um mehr Ausgabe zu bekommen"; shift; VERBOSE="$1" ;;
+    -r | --restart)
+      echo "startet die grafische Oberfläche neu"; shift; RESTART="$1" ;;
+    -* | --*)
+      usage
+      error_exit "Unbekannte Option $1" ;;
+    *)
+      echo "Bearbeite Argument $1 ..." ;;
+  esac
+  shift
+done
+
+# ============ Hauptprogramm ============
+menu
+
+standard_exit
+
